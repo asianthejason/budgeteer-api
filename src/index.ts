@@ -267,6 +267,113 @@ app.post("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
 });
 
 /* ---------------------------- Transactions ------------------------------- */
+/* ------------------------ Category: rules + edits ------------------------ */
+
+// Update a single transaction's category
+app.patch(
+  "/v1/transactions/:id/category",
+  requireAuth,
+  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
+    try {
+      const firebaseUid = req.user?.uid!;
+      const user = await prisma.user.findUnique({ where: { firebaseUid } });
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const txId = String(req.params.id);
+      const category = String((req.body?.category ?? "")).trim();
+      if (!category) return res.status(400).json({ error: "category is required" });
+
+      const tx = await prisma.transaction.findFirst({
+        where: { id: txId, userId: user.id },
+      });
+      if (!tx) return res.status(404).json({ error: "Transaction not found" });
+
+      const updated = await prisma.transaction.update({
+        where: { id: tx.id },
+        data: { category },
+        select: {
+          id: true,
+          date: true,
+          description: true,
+          amount: true,
+          category: true,
+        },
+      });
+
+      res.json({ transaction: updated });
+    } catch (e: any) {
+      console.error("PATCH /v1/transactions/:id/category error", e);
+      res.status(500).json({ error: e?.message ?? "server error" });
+    }
+  }
+);
+
+// Create a category rule (optionally apply to existing transactions)
+app.post(
+  "/v1/category-rules",
+  requireAuth,
+  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
+    try {
+      const firebaseUid = req.user?.uid!;
+      const user = await prisma.user.findUnique({ where: { firebaseUid } });
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const pattern = String((req.body?.pattern ?? "")).trim();
+      const category = String((req.body?.category ?? "")).trim();
+      const isRegex = !!req.body?.isRegex;
+      const applyToExisting = !!req.body?.applyToExisting;
+
+      if (!pattern) return res.status(400).json({ error: "pattern is required" });
+      if (!category) return res.status(400).json({ error: "category is required" });
+
+      // Validate regex if requested
+      let re: RegExp | null = null;
+      if (isRegex) {
+        try {
+          re = new RegExp(pattern, "i");
+        } catch {
+          return res.status(400).json({ error: "invalid regex pattern" });
+        }
+      }
+
+      const rule = await prisma.userCategoryRule.create({
+        data: { userId: user.id, pattern, isRegex, category },
+      });
+
+      // Optionally apply to existing transactions (idempotent - only touches user's txs)
+      let updatedCount = 0;
+      if (applyToExisting) {
+        // Pull only the fields we need
+        const txs = await prisma.transaction.findMany({
+          where: { userId: user.id },
+          select: { id: true, description: true },
+        });
+
+        const toUpdate: string[] = [];
+        for (const t of txs) {
+          const desc = (t.description || "").toString();
+          const match = isRegex ? re!.test(desc) : desc.toLowerCase().includes(pattern.toLowerCase());
+          if (match) toUpdate.push(t.id);
+        }
+
+        if (toUpdate.length) {
+          const result = await prisma.transaction.updateMany({
+            where: { id: { in: toUpdate }, userId: user.id },
+            data: { category },
+          });
+          updatedCount = result.count;
+        }
+      }
+
+      res.json({ rule, updatedCount });
+    } catch (e: any) {
+      console.error("POST /v1/category-rules error", e);
+      res.status(500).json({ error: e?.message ?? "server error" });
+    }
+  }
+);
+
+
 app.get("/v1/transactions", requireAuth, async (req: AuthedReq, res) => {
   const firebaseUid = req.user?.uid!;
   const user = await prisma.user.findUnique({ where: { firebaseUid } });
