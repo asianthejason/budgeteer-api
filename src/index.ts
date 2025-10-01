@@ -309,6 +309,7 @@ app.patch(
 );
 
 // Create a category rule (optionally apply to existing transactions)
+// Create a category rule (respond immediately; apply work runs after response)
 app.post(
   "/v1/category-rules",
   requireAuth,
@@ -326,11 +327,12 @@ app.post(
       if (!pattern) return res.status(400).json({ error: "pattern is required" });
       if (!category) return res.status(400).json({ error: "category is required" });
 
-      // Validate regex if needed
-      let re: RegExp | null = null;
+      // Validate regex early (if chosen)
       if (isRegex) {
         try {
-          re = new RegExp(pattern, "i");
+          // just to validate
+          // eslint-disable-next-line no-new
+          new RegExp(pattern, "i");
         } catch {
           return res.status(400).json({ error: "invalid regex pattern" });
         }
@@ -340,50 +342,61 @@ app.post(
         data: { userId: user.id, pattern, isRegex, category },
       });
 
-      // Apply to existing quickly
-      let updatedCount = 0;
-
-      if (applyToExisting) {
-        if (!isRegex) {
-          // FAST PATH: single SQL update (case-insensitive contains)
-          const result = await prisma.transaction.updateMany({
-            where: {
-              userId: user.id,
-              description: { contains: pattern, mode: "insensitive" },
-            },
-            data: { category },
-          });
-          updatedCount = result.count;
-        } else {
-          // Regex fallback (only fetch id+description to keep payload small)
-          const txs = await prisma.transaction.findMany({
-            where: { userId: user.id },
-            select: { id: true, description: true },
-          });
-
-          const toUpdate: string[] = [];
-          for (const t of txs) {
-            if (re!.test((t.description || "").toString())) toUpdate.push(t.id);
-          }
-
-          if (toUpdate.length) {
-            const result = await prisma.transaction.updateMany({
-              where: { id: { in: toUpdate }, userId: user.id },
-              data: { category },
-            });
-            updatedCount = result.count;
-          }
-        }
+      if (!applyToExisting) {
+        // Simple case — respond immediately
+        return res.json({ rule, updatedCount: 0 });
       }
 
-      // Respond promptly so the edge doesn’t time out
-      res.json({ rule, updatedCount });
+      // Respond FIRST so the edge never times out
+      res.status(202).json({ rule, queued: true });
+
+      // Then apply in the background (fire-and-forget)
+      (async () => {
+        try {
+          if (!isRegex) {
+            // FAST PATH: single SQL update (case-insensitive contains)
+            const result = await prisma.transaction.updateMany({
+              where: {
+                userId: user.id,
+                description: { contains: pattern, mode: "insensitive" },
+              },
+              data: { category },
+            });
+            console.log(
+              `[rules] applied non-regex rule to ${result.count} transactions`
+            );
+          } else {
+            // Regex fallback: fetch only minimal fields
+            const txs = await prisma.transaction.findMany({
+              where: { userId: user.id },
+              select: { id: true, description: true },
+            });
+            const re = new RegExp(pattern, "i");
+            const toUpdate: string[] = [];
+            for (const t of txs) {
+              if (re.test((t.description || "").toString())) toUpdate.push(t.id);
+            }
+            if (toUpdate.length) {
+              const result = await prisma.transaction.updateMany({
+                where: { id: { in: toUpdate }, userId: user.id },
+                data: { category },
+              });
+              console.log(
+                `[rules] applied regex rule to ${result.count} transactions`
+              );
+            }
+          }
+        } catch (e) {
+          console.error("Background apply category rule failed:", e);
+        }
+      })();
     } catch (e: any) {
       console.error("POST /v1/category-rules error", e);
       res.status(500).json({ error: e?.message ?? "server error" });
     }
   }
 );
+
 
 
 
