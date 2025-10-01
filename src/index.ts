@@ -244,27 +244,7 @@ app.get("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
   res.json({ rules });
 });
 
-// Create a rule
-app.post("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
-  const firebaseUid = req.user?.uid!;
-  const user = await prisma.user.findUnique({ where: { firebaseUid } });
-  if (!user) return res.status(404).json({ error: "User not found" });
 
-  let { pattern, category, isRegex } = req.body || {};
-  pattern = (pattern ?? "").toString().trim();
-  category = (category ?? "").toString().trim();
-  isRegex = !!isRegex;
-
-  if (!pattern || !category) {
-    return res.status(400).json({ error: "pattern and category are required" });
-  }
-
-  const rule = await prisma.userCategoryRule.create({
-    data: { userId: user.id, pattern, category, isRegex },
-  });
-
-  res.json({ rule });
-});
 
 /* ---------------------------- Transactions ------------------------------- */
 /* ------------------------ Category: rules + edits ------------------------ */
