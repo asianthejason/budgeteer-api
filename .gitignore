@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# build artifacts
+dist/
+coverage/
+
+# env & secrets
+.env
+.env.*.local
+firebase-service-account.json
+
+# misc
+.DS_Store

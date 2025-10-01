@@ -1,0 +1,99 @@
+// prisma/schema.prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  firebaseUid  String   @unique
+  email        String   @unique
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile      Profile?
+  connections  InstitutionConnection[]
+  accounts     Account[]
+  transactions Transaction[]
+}
+
+model Profile {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+
+  displayName String?
+  currency    String   @default("CAD")
+  timezone    String   @default("America/Edmonton")
+
+  // Added safe timestamps so migrations won’t fail on existing rows
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+}
+
+model InstitutionConnection {
+  id          String   @id @default(cuid())
+  userId      String
+  provider    String   @default("flinks")
+  externalId  String
+  accessToken String
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User     @relation(fields: [userId], references: [id])
+  accounts    Account[]
+
+  // One connection per (user, externalId)
+  @@unique([userId, externalId])
+}
+
+model Account {
+  id           String   @id @default(cuid())
+  userId       String
+  connectionId String
+  provider     String   @default("flinks")
+  externalId   String   // account id from provider
+
+  name         String
+  nickname     String?  // <-- NEW: user-set nickname
+  type         String   // chequing, savings, credit, etc.
+  mask         String?  // last 4 digits
+  currency     String   @default("CAD")
+  balance      Decimal  @default(0)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User                  @relation(fields: [userId], references: [id])
+  connection   InstitutionConnection @relation(fields: [connectionId], references: [id])
+  transactions Transaction[]
+
+  // Prevent duplicate accounts per user
+  @@unique([userId, externalId])
+}
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  accountId   String
+  provider    String   @default("flinks")
+  externalId  String   // stable ID from mock/live provider
+  date        DateTime
+  description String
+  amount      Decimal
+  category    String   @default("Uncategorized")
+  raw         Json?
+
+  account   Account @relation(fields: [accountId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ⛳️ stops the same provider txn being created twice for a user
+  @@unique([userId, externalId])
+}
