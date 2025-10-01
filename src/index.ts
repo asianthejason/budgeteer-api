@@ -10,7 +10,12 @@ const prisma = new PrismaClient();
 
 /* ----------------------------- Firebase Admin ---------------------------- */
 admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID!,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL!,
+    // handle both raw multiline and \n-escaped values
+    privateKey: (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+  }),
 });
 
 /* -------------------------------- Flinks -------------------------------- */
