@@ -432,8 +432,48 @@ const MOCK_ACCOUNTS = [
   },
 ];
 
-// Aug & Sep 2025 mock transactions
+// Oct, Sep, Aug 2025 mock transactions
 const MOCK_TRANSACTIONS = [
+  // ===== October 2025 =====
+  // Income
+  { externalId: "2025-10_inc_1", accountExternalId: "acc_chk_1234", date: "2025-10-15", description: "Payroll Deposit", amount: 2500.0, category: "Income", provider: "mock" },
+
+  // Groceries
+  { externalId: "2025-10_groc_1", accountExternalId: "acc_chk_1234", date: "2025-10-05", description: "Safeway Groceries", amount: -84.32, category: "Groceries", provider: "mock" },
+  { externalId: "2025-10_groc_2", accountExternalId: "acc_chk_1234", date: "2025-10-19", description: "Costco", amount: -138.77, category: "Groceries", provider: "mock" },
+
+  // Subscriptions
+  { externalId: "2025-10_sub_1", accountExternalId: "acc_chk_1234", date: "2025-10-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
+  { externalId: "2025-10_sub_2", accountExternalId: "acc_chk_1234", date: "2025-10-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
+
+  // Transport
+  { externalId: "2025-10_trans_1", accountExternalId: "acc_cc_9876", date: "2025-10-08", description: "Uber", amount: -21.35, category: "Transport", provider: "mock" },
+  { externalId: "2025-10_trans_2", accountExternalId: "acc_cc_9876", date: "2025-10-16", description: "Gas Station", amount: -54.91, category: "Transport", provider: "mock" },
+
+  // Dining
+  { externalId: "2025-10_dine_1", accountExternalId: "acc_cc_9876", date: "2025-10-06", description: "Chipotle", amount: -12.85, category: "Dining", provider: "mock" },
+  { externalId: "2025-10_dine_2", accountExternalId: "acc_cc_9876", date: "2025-10-21", description: "Starbucks", amount: -5.25, category: "Dining", provider: "mock" },
+
+  // Utilities
+  { externalId: "2025-10_util_1", accountExternalId: "acc_chk_1234", date: "2025-10-10", description: "Electricity", amount: -63.40, category: "Utilities", provider: "mock" },
+  { externalId: "2025-10_util_2", accountExternalId: "acc_chk_1234", date: "2025-10-10", description: "Water", amount: -30.75, category: "Utilities", provider: "mock" },
+
+  // Shopping
+  { externalId: "2025-10_shop_1", accountExternalId: "acc_cc_9876", date: "2025-10-12", description: "Amazon", amount: -39.99, category: "Shopping", provider: "mock" },
+  { externalId: "2025-10_shop_2", accountExternalId: "acc_cc_9876", date: "2025-10-25", description: "Best Buy", amount: -59.99, category: "Shopping", provider: "mock" },
+
+  // Entertainment
+  { externalId: "2025-10_ent_1", accountExternalId: "acc_cc_9876", date: "2025-10-11", description: "Movie Tickets", amount: -26.00, category: "Entertainment", provider: "mock" },
+  { externalId: "2025-10_ent_2", accountExternalId: "acc_cc_9876", date: "2025-10-26", description: "Steam", amount: -9.99, category: "Entertainment", provider: "mock" },
+
+  // Travel
+  { externalId: "2025-10_travel_1", accountExternalId: "acc_cc_9876", date: "2025-10-03", description: "Lyft", amount: -17.80, category: "Travel", provider: "mock" },
+  { externalId: "2025-10_travel_2", accountExternalId: "acc_cc_9876", date: "2025-10-28", description: "Hotel.com", amount: -92.00, category: "Travel", provider: "mock" },
+
+  // Health
+  { externalId: "2025-10_health_1", accountExternalId: "acc_chk_1234", date: "2025-10-09", description: "Pharmacy", amount: -12.60, category: "Health", provider: "mock" },
+  { externalId: "2025-10_health_2", accountExternalId: "acc_chk_1234", date: "2025-10-20", description: "Clinic", amount: -40.00, category: "Health", provider: "mock" },
+
   // ===== September 2025 =====
   { externalId: "2025-09_inc_1", accountExternalId: "acc_chk_1234", date: "2025-09-17", description: "Payroll Deposit", amount: 2500.0, category: "Income", provider: "mock" },
 
@@ -494,6 +534,7 @@ const MOCK_TRANSACTIONS = [
   { externalId: "2025-08_health_1", accountExternalId: "acc_chk_1234", date: "2025-08-11", description: "Pharmacy", amount: -11.6, category: "Health", provider: "mock" },
   { externalId: "2025-08_health_2", accountExternalId: "acc_chk_1234", date: "2025-08-20", description: "Clinic", amount: -45.0, category: "Health", provider: "mock" },
 ];
+
 
 /* ----------------------- Mock seeding (idempotent) ----------------------- */
 async function seedMockDataForUser(userId: string) {
