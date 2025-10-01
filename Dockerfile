@@ -1,16 +1,21 @@
-# Dockerfile (at repo root)
-FROM node:20-alpine
+# Dockerfile
+FROM node:20-bookworm-slim
+
+# Install system deps Prisma expects
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 1) Copy package manifests + prisma BEFORE npm ci (postinstall runs prisma generate)
+# Copy manifests + prisma first so postinstall (prisma generate) can run
 COPY package*.json ./
 COPY prisma ./prisma
 
-# 2) Install deps (runs postinstall -> prisma generate successfully)
+# Install dependencies (will run postinstall -> prisma generate)
 RUN npm ci
 
-# 3) Copy the rest of the source and build
+# Copy the rest & build
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -18,5 +23,5 @@ RUN npm run build
 ENV NODE_ENV=production
 EXPOSE 4000
 
-# Run DB migrations and start the server
+# Run DB migrations then start server
 CMD ["npm", "run", "start:prod"]
