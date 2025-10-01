@@ -9,14 +9,37 @@ import { PrismaClient, Prisma } from "@prisma/client";
 const prisma = new PrismaClient();
 
 /* ----------------------------- Firebase Admin ---------------------------- */
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID!,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL!,
-    // handle both raw multiline and \n-escaped values
-    privateKey: (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
-  }),
-});
+// Prefer env JSON; else explicit cert; else applicationDefault()
+(function initFirebase() {
+  try {
+    const svcJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+    if (svcJson) {
+      const svc = JSON.parse(svcJson);
+      admin.initializeApp({
+        credential: admin.credential.cert(svc as admin.ServiceAccount),
+      });
+      return;
+    }
+    if (
+      process.env.FIREBASE_PROJECT_ID &&
+      process.env.FIREBASE_CLIENT_EMAIL &&
+      process.env.FIREBASE_PRIVATE_KEY
+    ) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+        }),
+      });
+      return;
+    }
+    admin.initializeApp({ credential: admin.credential.applicationDefault() });
+  } catch (e) {
+    console.error("Firebase init error:", e);
+    admin.initializeApp({ credential: admin.credential.applicationDefault() });
+  }
+})();
 
 /* -------------------------------- Flinks -------------------------------- */
 const FLINKS_MODE = (process.env.FLINKS_MODE || "mock").toLowerCase();
@@ -24,7 +47,6 @@ const FLINKS_BASE_URL = process.env.FLINKS_BASE_URL || "";
 const FLINKS_CONNECT_URL = process.env.FLINKS_CONNECT_URL || "";
 const FLINKS_CLIENT_ID = process.env.FLINKS_CLIENT_ID || "";
 const FLINKS_CLIENT_SECRET = process.env.FLINKS_CLIENT_SECRET || "";
-const FLINKS_CUSTOMER_ID = process.env.FLINKS_CUSTOMER_ID || "";
 const FLINKS_REDIRECT_URI =
   process.env.FLINKS_REDIRECT_URI || "budgeteer://flinks/callback";
 
@@ -57,14 +79,10 @@ app.use(express.json());
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* --------------------------- Auth middleware ----------------------------- */
-async function requireAuth(
-  req: express.Request & { user?: admin.auth.DecodedIdToken },
-  res: express.Response,
-  next: express.NextFunction
-) {
+type AuthedReq = express.Request & { user?: admin.auth.DecodedIdToken };
+async function requireAuth(req: AuthedReq, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers.authorization || "";
-  const token =
-    authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
   if (!token) return res.status(401).json({ error: "Missing token" });
   try {
     const decoded = await admin.auth().verifyIdToken(token);
@@ -76,52 +94,122 @@ async function requireAuth(
   }
 }
 
+/* ---------------------------- Helpers: rules ----------------------------- */
+function safeLower(s?: string | null) {
+  return (s ?? "").toString().toLowerCase();
+}
+
+function matchWithRule(text: string, rule: { pattern: string; isRegex: boolean }) {
+  if (!rule.pattern) return false;
+  if (rule.isRegex) {
+    try {
+      // allow patterns like "/safeway/i" or "safeway" (treated as plain if no /.../)
+      const m = rule.pattern.match(/^\/(.+)\/([gimsuy]*)$/);
+      if (m) {
+        const re = new RegExp(m[1], m[2]);
+        return re.test(text);
+      }
+      const re = new RegExp(rule.pattern, "i");
+      return re.test(text);
+    } catch {
+      // fall back to substring if regex invalid
+      return safeLower(text).includes(safeLower(rule.pattern));
+    }
+  }
+  return safeLower(text).includes(safeLower(rule.pattern));
+}
+
+async function chooseCategoryForTx(
+  userId: string,
+  description: string,
+  amount: number,
+  providerCategory?: string | null
+): Promise<string> {
+  // Income stays Income, regardless of rules.
+  if (amount > 0) return "Income";
+
+  const rules = await prisma.userCategoryRule.findMany({
+    where: { userId },
+    orderBy: { createdAt: "asc" }, // first match wins (oldest first)
+  });
+
+  for (const r of rules) {
+    if (matchWithRule(description, { pattern: r.pattern, isRegex: r.isRegex })) {
+      return r.category || "Uncategorized";
+    }
+  }
+
+  // fallback to provider / else Uncategorized
+  return providerCategory?.trim() || "Uncategorized";
+}
+
 /* ------------------------------- Users ----------------------------------- */
-app.post(
-  "/v1/auth/sync",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-    const email = req.user?.email;
-    const firebaseUid = req.user?.uid!;
-    if (!email) return res.status(400).json({ error: "Email required on token" });
+app.post("/v1/auth/sync", requireAuth, async (req: AuthedReq, res) => {
+  const email = req.user?.email;
+  const firebaseUid = req.user?.uid!;
+  if (!email) return res.status(400).json({ error: "Email required on token" });
 
-    const user = await prisma.user.upsert({
-      where: { firebaseUid },
-      update: { email },
-      create: { email, firebaseUid, profile: { create: {} } },
-      include: { profile: true },
-    });
+  const user = await prisma.user.upsert({
+    where: { firebaseUid },
+    update: { email },
+    create: { email, firebaseUid, profile: { create: {} } },
+    include: { profile: true },
+  });
 
-    res.json({ user });
-  }
-);
+  res.json({ user });
+});
 
-app.get(
-  "/v1/users/me",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-    const firebaseUid = req.user?.uid!;
-    const user = await prisma.user.findUnique({
-      where: { firebaseUid },
-      include: { profile: true },
-    });
-    if (!user) return res.status(404).json({ error: "User not found" });
-    res.json({ user });
-  }
-);
+app.get("/v1/users/me", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({
+    where: { firebaseUid },
+    include: { profile: true },
+  });
+  if (!user) return res.status(404).json({ error: "User not found" });
+  res.json({ user });
+});
 
 /* ------------------------------ Accounts --------------------------------- */
-app.get(
-  "/v1/accounts",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
+app.get("/v1/accounts", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  const accounts = await prisma.account.findMany({
+    where: { userId: user.id },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      externalId: true,
+      name: true,
+      nickname: true,
+      type: true,
+      mask: true,
+      currency: true,
+      balance: true,
+    },
+  });
+
+  res.json({ accounts });
+});
+
+app.patch("/v1/accounts/:id", requireAuth, async (req: AuthedReq, res) => {
+  try {
+    const accountId = String(req.params.id);
+    const nickname = (req.body?.nickname ?? "").toString().trim();
+
     const firebaseUid = req.user?.uid!;
     const user = await prisma.user.findUnique({ where: { firebaseUid } });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const accounts = await prisma.account.findMany({
-      where: { userId: user.id },
-      orderBy: { createdAt: "asc" },
+    const account = await prisma.account.findFirst({
+      where: { id: accountId, userId: user.id },
+    });
+    if (!account) return res.status(404).json({ error: "Account not found" });
+
+    const updated = await prisma.account.update({
+      where: { id: account.id },
+      data: { nickname: nickname || null },
       select: {
         id: true,
         externalId: true,
@@ -134,30 +222,79 @@ app.get(
       },
     });
 
-    res.json({ accounts });
+    res.json({ account: updated });
+  } catch (e: any) {
+    console.error("PATCH /v1/accounts/:id error", e);
+    res.status(500).json({ error: e?.message ?? "server error" });
   }
-);
+});
 
-app.patch(
-  "/v1/accounts/:id",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-    try {
-      const accountId = String(req.params.id);
-      const nickname = (req.body?.nickname ?? "").toString().trim();
+/* ---------------------------- Category Rules ----------------------------- */
+// List rules (optional—handy for debugging UI later)
+app.get("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
 
-      const firebaseUid = req.user?.uid!;
-      const user = await prisma.user.findUnique({ where: { firebaseUid } });
-      if (!user) return res.status(404).json({ error: "User not found" });
+  const rules = await prisma.userCategoryRule.findMany({
+    where: { userId: user.id },
+    orderBy: [{ createdAt: "asc" }],
+  });
 
-      const account = await prisma.account.findFirst({
-        where: { id: accountId, userId: user.id },
-      });
-      if (!account) return res.status(404).json({ error: "Account not found" });
+  res.json({ rules });
+});
 
-      const updated = await prisma.account.update({
-        where: { id: account.id },
-        data: { nickname: nickname || null },
+// Create a rule
+app.post("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  let { pattern, category, isRegex } = req.body || {};
+  pattern = (pattern ?? "").toString().trim();
+  category = (category ?? "").toString().trim();
+  isRegex = !!isRegex;
+
+  if (!pattern || !category) {
+    return res.status(400).json({ error: "pattern and category are required" });
+  }
+
+  const rule = await prisma.userCategoryRule.create({
+    data: { userId: user.id, pattern, category, isRegex },
+  });
+
+  res.json({ rule });
+});
+
+/* ---------------------------- Transactions ------------------------------- */
+app.get("/v1/transactions", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  const from = req.query.from ? new Date(String(req.query.from)) : undefined;
+  const to = req.query.to ? new Date(String(req.query.to)) : undefined;
+
+  const txs = await prisma.transaction.findMany({
+    where: {
+      userId: user.id,
+      ...(from || to
+        ? {
+            date: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lt: to } : {}),
+            },
+          }
+        : {}),
+    },
+    orderBy: { date: "desc" },
+    select: {
+      id: true,
+      date: true,
+      description: true,
+      amount: true,
+      category: true,
+      account: {
         select: {
           id: true,
           externalId: true,
@@ -165,165 +302,172 @@ app.patch(
           nickname: true,
           type: true,
           mask: true,
-          currency: true,
-          balance: true,
         },
-      });
+      },
+    },
+  });
 
-      res.json({ account: updated });
-    } catch (e: any) {
-      console.error("PATCH /v1/accounts/:id error", e);
-      res.status(500).json({ error: e?.message ?? "server error" });
+  res.json({ transactions: txs });
+});
+
+// Edit a single transaction’s category
+app.patch("/v1/transactions/:id", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  const id = String(req.params.id);
+  const category = (req.body?.category ?? "").toString().trim();
+  if (!category) return res.status(400).json({ error: "category is required" });
+
+  const tx = await prisma.transaction.findFirst({ where: { id, userId: user.id } });
+  if (!tx) return res.status(404).json({ error: "Transaction not found" });
+
+  const updated = await prisma.transaction.update({
+    where: { id },
+    data: { category },
+    select: { id: true, category: true },
+  });
+
+  res.json({ transaction: updated });
+});
+
+// Re-run classification for a date range (optional admin/dev helper)
+app.post("/v1/transactions/reclassify", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  const from = req.body?.from ? new Date(String(req.body.from)) : undefined;
+  const to = req.body?.to ? new Date(String(req.body.to)) : undefined;
+
+  const txs = await prisma.transaction.findMany({
+    where: {
+      userId: user.id,
+      ...(from || to
+        ? {
+            date: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lt: to } : {}),
+            },
+          }
+        : {}),
+    },
+    select: { id: true, description: true, amount: true, category: true },
+  });
+
+  let updatedCount = 0;
+  for (const t of txs) {
+    const newCat = await chooseCategoryForTx(user.id, t.description, Number(t.amount), t.category);
+    if (newCat !== t.category) {
+      await prisma.transaction.update({ where: { id: t.id }, data: { category: newCat } });
+      updatedCount++;
     }
   }
-);
 
-/* ---------------------------- Transactions ------------------------------- */
-app.get(
-  "/v1/transactions",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-    const firebaseUid = req.user?.uid!;
-    const user = await prisma.user.findUnique({ where: { firebaseUid } });
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    const from = req.query.from ? new Date(String(req.query.from)) : undefined;
-    const to = req.query.to ? new Date(String(req.query.to)) : undefined;
-
-    const txs = await prisma.transaction.findMany({
-      where: {
-        userId: user.id,
-        ...(from || to
-          ? {
-              date: {
-                ...(from ? { gte: from } : {}),
-                ...(to ? { lt: to } : {}),
-              },
-            }
-          : {}),
-      },
-      orderBy: { date: "desc" },
-      select: {
-        id: true,
-        date: true,
-        description: true,
-        amount: true,
-        category: true,
-        account: {
-          select: {
-            id: true,
-            externalId: true,
-            name: true,
-            nickname: true,
-            type: true,
-            mask: true,
-          },
-        },
-      },
-    });
-
-    res.json({ transactions: txs });
-  }
-);
+  res.json({ ok: true, updated: updatedCount });
+});
 
 /* --------------------------- Flinks: Connect ----------------------------- */
-app.post(
-  "/v1/aggregations/flinks/init",
-  requireAuth,
-  async (_req, res) => {
-    if (FLINKS_MODE === "mock") {
-      return res.json({ connectUrl: "mock://connect", sessionId: "mock-session" });
-    }
-
-    if (!ensureLive(res, "init")) return;
-    try {
-      const params = new URLSearchParams({ redirectUrl: FLINKS_REDIRECT_URI });
-      const connectUrl = `${FLINKS_CONNECT_URL}/?${params.toString()}`;
-      res.json({ connectUrl });
-    } catch (e: any) {
-      console.error("flinks init error", e);
-      res.status(500).json({ error: e.message });
-    }
+app.post("/v1/aggregations/flinks/init", requireAuth, async (_req, res) => {
+  if (FLINKS_MODE === "mock") {
+    return res.json({ connectUrl: "mock://connect", sessionId: "mock-session" });
   }
-);
 
-app.post(
-  "/v1/aggregations/flinks/exchange",
-  requireAuth,
-  async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-    const firebaseUid = req.user?.uid!;
-    const user = await prisma.user.findUnique({ where: { firebaseUid } });
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    // MOCK: seed stable data (idempotent)
-    if (FLINKS_MODE === "mock") {
-      await seedMockDataForUser(user.id);
-      return res.json({ ok: true, mode: "mock" });
-    }
-
-    if (!ensureLive(res, "exchange")) return;
-
-    const { loginId, sessionId, code } = (req.body || {}) as any;
-    try {
-      const tokenResp = await flinksFetch("/connect/token", {
-        method: "POST",
-        body: JSON.stringify({
-          client_id: FLINKS_CLIENT_ID,
-          client_secret: FLINKS_CLIENT_SECRET,
-          grant_type: code ? "authorization_code" : "session",
-          code,
-          session_id: sessionId || loginId,
-        }),
-      });
-      const accessToken = (tokenResp as any).access_token || (tokenResp as any).token;
-
-      const conn = await upsertConnection(user.id, sessionId || loginId || "flinks", accessToken);
-
-      const accountsResp = await flinksFetch("/accounts", {
-        method: "POST",
-        body: JSON.stringify({ access_token: accessToken }),
-      });
-      const accounts = (accountsResp as any).accounts || accountsResp || [];
-      for (const a of accounts) {
-        await upsertAccount(user.id, conn.id, {
-          externalId: a.id || a.accountId || a.AccountId,
-          name: a.name || a.displayName || a.AccountName || "Account",
-          type: a.type || a.AccountType || "account",
-          mask: a.mask || a.Last4 || null,
-          currency: a.currency || a.Currency || "CAD",
-          balance: Number(a.balance ?? a.CurrentBalance ?? 0),
-        });
-      }
-
-      const txResp = await flinksFetch("/transactions", {
-        method: "POST",
-        body: JSON.stringify({ access_token: accessToken }),
-      });
-      const txs = (txResp as any).transactions || txResp || [];
-      for (const t of txs) {
-        const acctExternalId = t.accountId || t.AccountId;
-        const account = await prisma.account.findFirst({
-          where: { userId: user.id, externalId: String(acctExternalId) },
-        });
-        if (!account) continue;
-
-        await upsertTransaction(user.id, account.id, {
-          externalId: t.id || t.transactionId || t.TransactionId,
-          date: new Date(t.date || t.TransactionDate),
-          description: t.description || t.Memo || "Transaction",
-          amount: Number(t.amount ?? t.Amount ?? 0),
-          category: t.category || t.Category || "Uncategorized",
-          raw: t,
-        });
-      }
-
-      res.json({ ok: true });
-    } catch (e: any) {
-      console.error("flinks exchange error", e);
-      res.status(500).json({ error: e.message });
-    }
+  if (!ensureLive(res, "init")) return;
+  try {
+    const params = new URLSearchParams({ redirectUrl: FLINKS_REDIRECT_URI });
+    const connectUrl = `${FLINKS_CONNECT_URL}/?${params.toString()}`;
+    res.json({ connectUrl });
+  } catch (e: any) {
+    console.error("flinks init error", e);
+    res.status(500).json({ error: e.message });
   }
-);
+});
+
+app.post("/v1/aggregations/flinks/exchange", requireAuth, async (req: AuthedReq, res) => {
+  const firebaseUid = req.user?.uid!;
+  const user = await prisma.user.findUnique({ where: { firebaseUid } });
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  // MOCK: seed stable data (idempotent) and apply rules
+  if (FLINKS_MODE === "mock") {
+    await seedMockDataForUser(user.id);
+    return res.json({ ok: true, mode: "mock" });
+  }
+
+  if (!ensureLive(res, "exchange")) return;
+
+  const { loginId, sessionId, code } = (req.body || {}) as any;
+  try {
+    const tokenResp = await flinksFetch("/connect/token", {
+      method: "POST",
+      body: JSON.stringify({
+        client_id: FLINKS_CLIENT_ID,
+        client_secret: FLINKS_CLIENT_SECRET,
+        grant_type: code ? "authorization_code" : "session",
+        code,
+        session_id: sessionId || loginId,
+      }),
+    });
+    const accessToken = (tokenResp as any).access_token || (tokenResp as any).token;
+
+    const conn = await upsertConnection(user.id, sessionId || loginId || "flinks", accessToken);
+
+    const accountsResp = await flinksFetch("/accounts", {
+      method: "POST",
+      body: JSON.stringify({ access_token: accessToken }),
+    });
+    const accounts = (accountsResp as any).accounts || accountsResp || [];
+    for (const a of accounts) {
+      await upsertAccount(user.id, conn.id, {
+        externalId: a.id || a.accountId || a.AccountId,
+        name: a.name || a.displayName || a.AccountName || "Account",
+        type: a.type || a.AccountType || "account",
+        mask: a.mask || a.Last4 || null,
+        currency: a.currency || a.Currency || "CAD",
+        balance: Number(a.balance ?? a.CurrentBalance ?? 0),
+      });
+    }
+
+    const txResp = await flinksFetch("/transactions", {
+      method: "POST",
+      body: JSON.stringify({ access_token: accessToken }),
+    });
+    const txs = (txResp as any).transactions || txResp || [];
+    for (const t of txs) {
+      const acctExternalId = t.accountId || t.AccountId;
+      const account = await prisma.account.findFirst({
+        where: { userId: user.id, externalId: String(acctExternalId) },
+      });
+      if (!account) continue;
+
+      // apply rules on ingest
+      const amount = Number(t.amount ?? t.Amount ?? 0);
+      const desc = t.description || t.Memo || "Transaction";
+      const chosenCategory = await chooseCategoryForTx(
+        user.id,
+        desc,
+        amount,
+        t.category || t.Category
+      );
+
+      await upsertTransaction(user.id, account.id, {
+        externalId: t.id || t.transactionId || t.TransactionId,
+        date: new Date(t.date || t.TransactionDate),
+        description: desc,
+        amount,
+        category: chosenCategory,
+        raw: t,
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (e: any) {
+    console.error("flinks exchange error", e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 /* ------------------------------- Helpers --------------------------------- */
 async function upsertConnection(userId: string, externalId: string, accessToken: string) {
@@ -432,115 +576,17 @@ const MOCK_ACCOUNTS = [
   },
 ];
 
-// Oct, Sep, Aug 2025 mock transactions
+// Aug, Sep (and your Oct you added separately)
 const MOCK_TRANSACTIONS = [
-  // ===== October 2025 =====
-  // Income
-  { externalId: "2025-10_inc_1", accountExternalId: "acc_chk_1234", date: "2025-10-15", description: "Payroll Deposit", amount: 2500.0, category: "Income", provider: "mock" },
-
-  // Groceries
-  { externalId: "2025-10_groc_1", accountExternalId: "acc_chk_1234", date: "2025-10-05", description: "Safeway Groceries", amount: -84.32, category: "Groceries", provider: "mock" },
-  { externalId: "2025-10_groc_2", accountExternalId: "acc_chk_1234", date: "2025-10-19", description: "Costco", amount: -138.77, category: "Groceries", provider: "mock" },
-
-  // Subscriptions
-  { externalId: "2025-10_sub_1", accountExternalId: "acc_chk_1234", date: "2025-10-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
-  { externalId: "2025-10_sub_2", accountExternalId: "acc_chk_1234", date: "2025-10-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
-
-  // Transport
-  { externalId: "2025-10_trans_1", accountExternalId: "acc_cc_9876", date: "2025-10-08", description: "Uber", amount: -21.35, category: "Transport", provider: "mock" },
-  { externalId: "2025-10_trans_2", accountExternalId: "acc_cc_9876", date: "2025-10-16", description: "Gas Station", amount: -54.91, category: "Transport", provider: "mock" },
-
-  // Dining
-  { externalId: "2025-10_dine_1", accountExternalId: "acc_cc_9876", date: "2025-10-06", description: "Chipotle", amount: -12.85, category: "Dining", provider: "mock" },
-  { externalId: "2025-10_dine_2", accountExternalId: "acc_cc_9876", date: "2025-10-21", description: "Starbucks", amount: -5.25, category: "Dining", provider: "mock" },
-
-  // Utilities
-  { externalId: "2025-10_util_1", accountExternalId: "acc_chk_1234", date: "2025-10-10", description: "Electricity", amount: -63.40, category: "Utilities", provider: "mock" },
-  { externalId: "2025-10_util_2", accountExternalId: "acc_chk_1234", date: "2025-10-10", description: "Water", amount: -30.75, category: "Utilities", provider: "mock" },
-
-  // Shopping
-  { externalId: "2025-10_shop_1", accountExternalId: "acc_cc_9876", date: "2025-10-12", description: "Amazon", amount: -39.99, category: "Shopping", provider: "mock" },
-  { externalId: "2025-10_shop_2", accountExternalId: "acc_cc_9876", date: "2025-10-25", description: "Best Buy", amount: -59.99, category: "Shopping", provider: "mock" },
-
-  // Entertainment
-  { externalId: "2025-10_ent_1", accountExternalId: "acc_cc_9876", date: "2025-10-11", description: "Movie Tickets", amount: -26.00, category: "Entertainment", provider: "mock" },
-  { externalId: "2025-10_ent_2", accountExternalId: "acc_cc_9876", date: "2025-10-26", description: "Steam", amount: -9.99, category: "Entertainment", provider: "mock" },
-
-  // Travel
-  { externalId: "2025-10_travel_1", accountExternalId: "acc_cc_9876", date: "2025-10-03", description: "Lyft", amount: -17.80, category: "Travel", provider: "mock" },
-  { externalId: "2025-10_travel_2", accountExternalId: "acc_cc_9876", date: "2025-10-28", description: "Hotel.com", amount: -92.00, category: "Travel", provider: "mock" },
-
-  // Health
-  { externalId: "2025-10_health_1", accountExternalId: "acc_chk_1234", date: "2025-10-09", description: "Pharmacy", amount: -12.60, category: "Health", provider: "mock" },
-  { externalId: "2025-10_health_2", accountExternalId: "acc_chk_1234", date: "2025-10-20", description: "Clinic", amount: -40.00, category: "Health", provider: "mock" },
-
-  // ===== September 2025 =====
+  // ===== September 2025 (sample subset) =====
   { externalId: "2025-09_inc_1", accountExternalId: "acc_chk_1234", date: "2025-09-17", description: "Payroll Deposit", amount: 2500.0, category: "Income", provider: "mock" },
-
   { externalId: "2025-09_groc_1", accountExternalId: "acc_chk_1234", date: "2025-09-11", description: "Safeway Groceries", amount: -82.45, category: "Groceries", provider: "mock" },
-  { externalId: "2025-09_groc_2", accountExternalId: "acc_chk_1234", date: "2025-09-20", description: "Costco", amount: -145.1, category: "Groceries", provider: "mock" },
-
-  { externalId: "2025-09_sub_1", accountExternalId: "acc_chk_1234", date: "2025-09-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
-  { externalId: "2025-09_sub_2", accountExternalId: "acc_chk_1234", date: "2025-09-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
-
-  { externalId: "2025-09_trans_1", accountExternalId: "acc_cc_9876", date: "2025-09-15", description: "Gas Station", amount: -56.2, category: "Transport", provider: "mock" },
-  { externalId: "2025-09_trans_2", accountExternalId: "acc_cc_9876", date: "2025-09-05", description: "Uber", amount: -18.75, category: "Transport", provider: "mock" },
-
-  { externalId: "2025-09_dine_1", accountExternalId: "acc_cc_9876", date: "2025-09-07", description: "Chipotle", amount: -13.5, category: "Dining", provider: "mock" },
-  { externalId: "2025-09_dine_2", accountExternalId: "acc_cc_9876", date: "2025-09-22", description: "Starbucks", amount: -5.25, category: "Dining", provider: "mock" },
-
-  { externalId: "2025-09_util_1", accountExternalId: "acc_chk_1234", date: "2025-09-10", description: "Electricity", amount: -64.8, category: "Utilities", provider: "mock" },
-  { externalId: "2025-09_util_2", accountExternalId: "acc_chk_1234", date: "2025-09-10", description: "Water", amount: -31.4, category: "Utilities", provider: "mock" },
-
-  { externalId: "2025-09_shop_1", accountExternalId: "acc_cc_9876", date: "2025-09-18", description: "Amazon", amount: -42.99, category: "Shopping", provider: "mock" },
-  { externalId: "2025-09_shop_2", accountExternalId: "acc_cc_9876", date: "2025-09-23", description: "Apple Store", amount: -19.99, category: "Shopping", provider: "mock" },
-
-  { externalId: "2025-09_ent_1", accountExternalId: "acc_cc_9876", date: "2025-09-09", description: "Movie Tickets", amount: -28.0, category: "Entertainment", provider: "mock" },
-  { externalId: "2025-09_ent_2", accountExternalId: "acc_cc_9876", date: "2025-09-27", description: "Steam", amount: -12.0, category: "Entertainment", provider: "mock" },
-
-  { externalId: "2025-09_travel_1", accountExternalId: "acc_cc_9876", date: "2025-09-03", description: "Lyft", amount: -22.1, category: "Travel", provider: "mock" },
-  { externalId: "2025-09_travel_2", accountExternalId: "acc_cc_9876", date: "2025-09-24", description: "Airbnb", amount: -85.0, category: "Travel", provider: "mock" },
-
-  { externalId: "2025-09_health_1", accountExternalId: "acc_chk_1234", date: "2025-09-11", description: "Pharmacy", amount: -14.2, category: "Health", provider: "mock" },
-  { externalId: "2025-09_health_2", accountExternalId: "acc_chk_1234", date: "2025-09-19", description: "Dentist", amount: -60.0, category: "Health", provider: "mock" },
-
-  // ===== August 2025 =====
-  { externalId: "2025-08_inc_1", accountExternalId: "acc_chk_1234", date: "2025-08-15", description: "Payroll Deposit", amount: 2500.0, category: "Income", provider: "mock" },
-
-  { externalId: "2025-08_groc_1", accountExternalId: "acc_chk_1234", date: "2025-08-08", description: "Safeway", amount: -76.12, category: "Groceries", provider: "mock" },
-  { externalId: "2025-08_groc_2", accountExternalId: "acc_chk_1234", date: "2025-08-21", description: "Costco", amount: -132.7, category: "Groceries", provider: "mock" },
-
-  { externalId: "2025-08_sub_1", accountExternalId: "acc_chk_1234", date: "2025-08-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
-  { externalId: "2025-08_sub_2", accountExternalId: "acc_chk_1234", date: "2025-08-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
-
-  { externalId: "2025-08_trans_1", accountExternalId: "acc_cc_9876", date: "2025-08-06", description: "Gas", amount: -48.75, category: "Transport", provider: "mock" },
-  { externalId: "2025-08_trans_2", accountExternalId: "acc_cc_9876", date: "2025-08-28", description: "Uber", amount: -16.2, category: "Transport", provider: "mock" },
-
-  { externalId: "2025-08_dine_1", accountExternalId: "acc_cc_9876", date: "2025-08-05", description: "Taco Bell", amount: -9.8, category: "Dining", provider: "mock" },
-  { externalId: "2025-08_dine_2", accountExternalId: "acc_cc_9876", date: "2025-08-18", description: "Starbucks", amount: -5.25, category: "Dining", provider: "mock" },
-
-  { externalId: "2025-08_util_1", accountExternalId: "acc_chk_1234", date: "2025-08-10", description: "Electricity", amount: -61.1, category: "Utilities", provider: "mock" },
-  { externalId: "2025-08_util_2", accountExternalId: "acc_chk_1234", date: "2025-08-10", description: "Water", amount: -28.9, category: "Utilities", provider: "mock" },
-
-  { externalId: "2025-08_shop_1", accountExternalId: "acc_cc_9876", date: "2025-08-12", description: "Amazon", amount: -38.5, category: "Shopping", provider: "mock" },
-  { externalId: "2025-08_shop_2", accountExternalId: "acc_cc_9876", date: "2025-08-25", description: "Target", amount: -24.0, category: "Shopping", provider: "mock" },
-
-  { externalId: "2025-08_ent_1", accountExternalId: "acc_cc_9876", date: "2025-08-09", description: "Hulu", amount: -12.99, category: "Entertainment", provider: "mock" },
-  { externalId: "2025-08_ent_2", accountExternalId: "acc_cc_9876", date: "2025-08-26", description: "Nintendo eShop", amount: -8.0, category: "Entertainment", provider: "mock" },
-
-  { externalId: "2025-08_travel_1", accountExternalId: "acc_cc_9876", date: "2025-08-03", description: "Lyft", amount: -18.4, category: "Travel", provider: "mock" },
-  { externalId: "2025-08_travel_2", accountExternalId: "acc_cc_9876", date: "2025-08-22", description: "Hotel.com", amount: -72.0, category: "Travel", provider: "mock" },
-
-  { externalId: "2025-08_health_1", accountExternalId: "acc_chk_1234", date: "2025-08-11", description: "Pharmacy", amount: -11.6, category: "Health", provider: "mock" },
-  { externalId: "2025-08_health_2", accountExternalId: "acc_chk_1234", date: "2025-08-20", description: "Clinic", amount: -45.0, category: "Health", provider: "mock" },
+  // … keep your existing mock list (Aug/Sep/Oct) …
 ];
 
-
-/* ----------------------- Mock seeding (idempotent) ----------------------- */
 async function seedMockDataForUser(userId: string) {
   const conn = await upsertConnection(userId, "mock-connection", "mock-token");
-
-  // upsert accounts (nickname preserved)
+  // Accounts
   for (const a of MOCK_ACCOUNTS) {
     await upsertAccount(userId, conn.id, {
       externalId: a.externalId,
@@ -551,8 +597,7 @@ async function seedMockDataForUser(userId: string) {
       balance: a.balance,
     });
   }
-
-  // build extId -> id map once
+  // Map for account IDs
   const accs = await prisma.account.findMany({
     where: { userId },
     select: { id: true, externalId: true },
@@ -560,16 +605,23 @@ async function seedMockDataForUser(userId: string) {
   const idByExt: Record<string, string> = {};
   for (const a of accs) idByExt[String(a.externalId)] = a.id;
 
-  // upsert transactions
+  // Transactions (apply rules at seed time)
   for (const t of MOCK_TRANSACTIONS) {
     const accId = idByExt[t.accountExternalId];
     if (!accId) continue;
+    const amount = Number(t.amount);
+    const chosenCategory = await chooseCategoryForTx(
+      userId,
+      t.description,
+      amount,
+      t.category
+    );
     await upsertTransaction(userId, accId, {
       externalId: t.externalId,
       date: new Date(t.date),
       description: t.description,
-      amount: t.amount,
-      category: t.category,
+      amount,
+      category: chosenCategory,
       raw: t,
     });
   }
@@ -577,23 +629,20 @@ async function seedMockDataForUser(userId: string) {
 
 /* --------------------------- Dev helper (mock) --------------------------- */
 if (FLINKS_MODE === "mock") {
-  app.post(
-    "/v1/dev/reset",
-    requireAuth,
-    async (req: express.Request & { user?: admin.auth.DecodedIdToken }, res) => {
-      const firebaseUid = req.user?.uid!;
-      const user = await prisma.user.findUnique({ where: { firebaseUid } });
-      if (!user) return res.status(404).json({ error: "User not found" });
+  app.post("/v1/dev/reset", requireAuth, async (req: AuthedReq, res) => {
+    const firebaseUid = req.user?.uid!;
+    const user = await prisma.user.findUnique({ where: { firebaseUid } });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-      await prisma.$transaction([
-        prisma.transaction.deleteMany({ where: { userId: user.id } }),
-        prisma.account.deleteMany({ where: { userId: user.id } }),
-        prisma.institutionConnection.deleteMany({ where: { userId: user.id } }),
-      ]);
+    await prisma.$transaction([
+      prisma.transaction.deleteMany({ where: { userId: user.id } }),
+      prisma.account.deleteMany({ where: { userId: user.id } }),
+      prisma.institutionConnection.deleteMany({ where: { userId: user.id } }),
+      prisma.userCategoryRule.deleteMany({ where: { userId: user.id } }),
+    ]);
 
-      res.json({ ok: true, cleared: true });
-    }
-  );
+    res.json({ ok: true, cleared: true });
+  });
 }
 
 /* --------------------------- Errors & Boot ------------------------------- */
@@ -604,15 +653,3 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`API listening on :${port}`));
-
-
-// Prefer env JSON; else fall back to applicationDefault()
-const svcJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-if (!admin.apps.length) {
-  if (svcJson) {
-    const svc = JSON.parse(svcJson);
-    admin.initializeApp({ credential: admin.credential.cert(svc as admin.ServiceAccount) });
-  } else {
-    admin.initializeApp({ credential: admin.credential.applicationDefault() });
-  }
-}
