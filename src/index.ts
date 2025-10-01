@@ -558,3 +558,15 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`API listening on :${port}`));
+
+
+// Prefer env JSON; else fall back to applicationDefault()
+const svcJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (!admin.apps.length) {
+  if (svcJson) {
+    const svc = JSON.parse(svcJson);
+    admin.initializeApp({ credential: admin.credential.cert(svc as admin.ServiceAccount) });
+  } else {
+    admin.initializeApp({ credential: admin.credential.applicationDefault() });
+  }
+}
