@@ -9,66 +9,67 @@ generator client {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  firebaseUid  String   @unique
-  email        String   @unique
+  id          String @id @default(cuid())
+  firebaseUid String @unique
+  email       String @unique
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  profile      Profile?
-  connections  InstitutionConnection[]
-  accounts     Account[]
-  transactions Transaction[]
+  profile       Profile?
+  connections   InstitutionConnection[]
+  accounts      Account[]
+  transactions  Transaction[]
+  categoryRules UserCategoryRule[]      @relation(name: "UserToCategoryRules")
 }
 
 model Profile {
-  id          String   @id @default(cuid())
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id])
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
 
   displayName String?
-  currency    String   @default("CAD")
-  timezone    String   @default("America/Edmonton")
+  currency    String  @default("CAD")
+  timezone    String  @default("America/Edmonton")
 
   // Added safe timestamps so migrations won’t fail on existing rows
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 model InstitutionConnection {
-  id          String   @id @default(cuid())
+  id          String @id @default(cuid())
   userId      String
-  provider    String   @default("flinks")
+  provider    String @default("flinks")
   externalId  String
   accessToken String
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user        User     @relation(fields: [userId], references: [id])
-  accounts    Account[]
+  user     User      @relation(fields: [userId], references: [id])
+  accounts Account[]
 
   // One connection per (user, externalId)
   @@unique([userId, externalId])
 }
 
 model Account {
-  id           String   @id @default(cuid())
+  id           String @id @default(cuid())
   userId       String
   connectionId String
-  provider     String   @default("flinks")
-  externalId   String   // account id from provider
+  provider     String @default("flinks")
+  externalId   String // account id from provider
 
-  name         String
-  nickname     String?  // <-- NEW: user-set nickname
-  type         String   // chequing, savings, credit, etc.
-  mask         String?  // last 4 digits
-  currency     String   @default("CAD")
-  balance      Decimal  @default(0)
+  name     String
+  nickname String? // <-- NEW: user-set nickname
+  type     String // chequing, savings, credit, etc.
+  mask     String? // last 4 digits
+  currency String  @default("CAD")
+  balance  Decimal @default(0)
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user         User                  @relation(fields: [userId], references: [id])
   connection   InstitutionConnection @relation(fields: [connectionId], references: [id])
@@ -77,23 +78,38 @@ model Account {
   // Prevent duplicate accounts per user
   @@unique([userId, externalId])
 }
+
 model Transaction {
   id          String   @id @default(cuid())
   userId      String
   accountId   String
   provider    String   @default("flinks")
-  externalId  String   // stable ID from mock/live provider
+  externalId  String // stable ID from mock/live provider
   date        DateTime
   description String
   amount      Decimal
   category    String   @default("Uncategorized")
   raw         Json?
 
-  account   Account @relation(fields: [accountId], references: [id])
-  user      User    @relation(fields: [userId], references: [id])
+  account   Account  @relation(fields: [accountId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // ⛳️ stops the same provider txn being created twice for a user
   @@unique([userId, externalId])
+}
+
+model UserCategoryRule {
+  id        String   @id @default(cuid())
+  userId    String
+  pattern   String
+  isRegex   Boolean  @default(false)
+  category  String
+  createdAt DateTime @default(now())
+
+  user User @relation(name: "UserToCategoryRules", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, category])
+  @@index([userId, pattern])
 }
