@@ -1,24 +1,22 @@
-# Use a single-stage build so Prisma CLI & generator are available at runtime
+# Dockerfile (at repo root)
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Install deps (includes dev deps so Prisma CLI exists)
+# 1) Copy package manifests + prisma BEFORE npm ci (postinstall runs prisma generate)
 COPY package*.json ./
-RUN npm ci
-
-# Copy source + Prisma schema/migrations
-COPY tsconfig.json ./
-COPY src ./src
 COPY prisma ./prisma
 
-# Generate Prisma client and build TS
-RUN npx prisma generate
+# 2) Install deps (runs postinstall -> prisma generate successfully)
+RUN npm ci
+
+# 3) Copy the rest of the source and build
+COPY tsconfig.json ./
+COPY src ./src
 RUN npm run build
 
-# Runtime
 ENV NODE_ENV=production
 EXPOSE 4000
 
-# Run migrations then start the server
+# Run DB migrations and start the server
 CMD ["npm", "run", "start:prod"]
