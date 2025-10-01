@@ -326,7 +326,7 @@ app.post(
       if (!pattern) return res.status(400).json({ error: "pattern is required" });
       if (!category) return res.status(400).json({ error: "category is required" });
 
-      // Validate regex if requested
+      // Validate regex if needed
       let re: RegExp | null = null;
       if (isRegex) {
         try {
@@ -340,31 +340,43 @@ app.post(
         data: { userId: user.id, pattern, isRegex, category },
       });
 
-      // Optionally apply to existing transactions (idempotent - only touches user's txs)
+      // Apply to existing quickly
       let updatedCount = 0;
+
       if (applyToExisting) {
-        // Pull only the fields we need
-        const txs = await prisma.transaction.findMany({
-          where: { userId: user.id },
-          select: { id: true, description: true },
-        });
-
-        const toUpdate: string[] = [];
-        for (const t of txs) {
-          const desc = (t.description || "").toString();
-          const match = isRegex ? re!.test(desc) : desc.toLowerCase().includes(pattern.toLowerCase());
-          if (match) toUpdate.push(t.id);
-        }
-
-        if (toUpdate.length) {
+        if (!isRegex) {
+          // FAST PATH: single SQL update (case-insensitive contains)
           const result = await prisma.transaction.updateMany({
-            where: { id: { in: toUpdate }, userId: user.id },
+            where: {
+              userId: user.id,
+              description: { contains: pattern, mode: "insensitive" },
+            },
             data: { category },
           });
           updatedCount = result.count;
+        } else {
+          // Regex fallback (only fetch id+description to keep payload small)
+          const txs = await prisma.transaction.findMany({
+            where: { userId: user.id },
+            select: { id: true, description: true },
+          });
+
+          const toUpdate: string[] = [];
+          for (const t of txs) {
+            if (re!.test((t.description || "").toString())) toUpdate.push(t.id);
+          }
+
+          if (toUpdate.length) {
+            const result = await prisma.transaction.updateMany({
+              where: { id: { in: toUpdate }, userId: user.id },
+              data: { category },
+            });
+            updatedCount = result.count;
+          }
         }
       }
 
+      // Respond promptly so the edge doesn’t time out
       res.json({ rule, updatedCount });
     } catch (e: any) {
       console.error("POST /v1/category-rules error", e);
@@ -372,6 +384,7 @@ app.post(
     }
   }
 );
+
 
 
 app.get("/v1/transactions", requireAuth, async (req: AuthedReq, res) => {
