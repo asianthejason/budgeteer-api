@@ -1,37 +1,35 @@
 # budgeteer-api/Dockerfile
 
-# ---- Build stage: install ALL deps, generate Prisma, compile TS ----
+# ---- Build stage ----
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Prisma on Alpine needs these
+# Needed by Prisma on Alpine
 RUN apk add --no-cache openssl libc6-compat
 
-# Install deps (uses package-lock.json)
+# Install deps without running postinstall
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
-# Generate Prisma client with dev deps available
+# Now copy prisma and generate client
 COPY prisma ./prisma
 RUN npx prisma generate
 
-# Copy the rest and build TypeScript
+# Copy the rest, then build TS
 COPY . .
 RUN npm run build
 
-# Drop dev deps for runtime
+# Prune dev deps for runtime
 RUN npm prune --omit=dev
 
-# ---- Runtime stage: copy only what's needed ----
+# ---- Runtime stage ----
 FROM node:20-alpine
 WORKDIR /app
 RUN apk add --no-cache openssl libc6-compat
 
-# Copy production node_modules, built JS, and package files
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
 
 EXPOSE 4000
-# Runs `prisma migrate deploy` then starts the server (per your package.json)
 CMD ["npm", "run", "start:prod"]
