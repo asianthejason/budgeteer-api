@@ -1,15 +1,27 @@
+// {
+//   "compilerOptions": {
+//     "target": "ES2020",
+//     "lib": ["ES2020"],
+//     "module": "CommonJS",
+//     "moduleResolution": "Node",
+//     "esModuleInterop": true,
+//     "resolveJsonModule": true,
+//     "strict": true,
+//     "skipLibCheck": true,
+//     "outDir": "dist",
+//     "types": ["node"]
+//   },
+//   "include": ["src/**/*.ts"]
+// }
 {
   "compilerOptions": {
     "target": "ES2020",
-    "lib": ["ES2020"],
     "module": "CommonJS",
-    "moduleResolution": "Node",
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "strict": true,
-    "skipLibCheck": true,
     "outDir": "dist",
-    "types": ["node"]
+    "rootDir": "src",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src"]
 }
