@@ -5,6 +5,7 @@ import cors from "cors";
 import helmet from "helmet";
 import admin from "firebase-admin";
 import { PrismaClient, Prisma } from "@prisma/client";
+import aiRouter from "./routes/ai"; // <-- your chatbot routes
 
 const prisma = new PrismaClient();
 
@@ -72,15 +73,33 @@ async function flinksFetch(path: string, init?: RequestInit) {
 
 /* -------------------------------- Express -------------------------------- */
 const app = express();
+app.set("trust proxy", 1); // Railway
 app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+// Surface if OpenAI is configured (chatbot)
+if (!process.env.OPENAI_API_KEY) {
+  console.warn("[boot] OPENAI_API_KEY is not set; /v1/ai routes may return 500s.");
+}
+
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: true,
+    env: {
+      flinksMode: FLINKS_MODE,
+      aiEnabled: !!process.env.OPENAI_API_KEY,
+    },
+  })
+);
 
 /* --------------------------- Auth middleware ----------------------------- */
 type AuthedReq = express.Request & { user?: admin.auth.DecodedIdToken };
-async function requireAuth(req: AuthedReq, res: express.Response, next: express.NextFunction) {
+async function requireAuth(
+  req: AuthedReq,
+  res: express.Response,
+  next: express.NextFunction
+) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
   if (!token) return res.status(401).json({ error: "Missing token" });
@@ -244,8 +263,6 @@ app.get("/v1/category-rules", requireAuth, async (req: AuthedReq, res) => {
   res.json({ rules });
 });
 
-
-
 /* ---------------------------- Transactions ------------------------------- */
 /* ------------------------ Category: rules + edits ------------------------ */
 
@@ -289,7 +306,6 @@ app.patch(
 );
 
 // --- REPLACE ONLY THIS ROUTE ---
-
 app.post(
   "/v1/category-rules",
   requireAuth,
@@ -309,7 +325,11 @@ app.post(
 
       // Validate regex once (if selected)
       if (isRegex) {
-        try { new RegExp(pattern, "i"); } catch { return res.status(400).json({ error: "invalid regex pattern" }); }
+        try {
+          new RegExp(pattern, "i");
+        } catch {
+          return res.status(400).json({ error: "invalid regex pattern" });
+        }
       }
 
       // 1) create rule (this is quick)
@@ -345,7 +365,9 @@ app.post(
               select: { id: true, description: true },
             });
             const re = new RegExp(pattern, "i");
-            const ids = rows.filter(r => re.test(String(r.description || ""))).map(r => r.id);
+            const ids = rows
+              .filter((r) => re.test(String(r.description || "")))
+              .map((r) => r.id);
             if (ids.length) {
               const result = await prisma.transaction.updateMany({
                 where: { id: { in: ids }, userId: user.id },
@@ -366,10 +388,6 @@ app.post(
     }
   }
 );
-
-
-
-
 
 app.get("/v1/transactions", requireAuth, async (req: AuthedReq, res) => {
   const firebaseUid = req.user?.uid!;
@@ -462,7 +480,12 @@ app.post("/v1/transactions/reclassify", requireAuth, async (req: AuthedReq, res)
 
   let updatedCount = 0;
   for (const t of txs) {
-    const newCat = await chooseCategoryForTx(user.id, t.description, Number(t.amount), t.category);
+    const newCat = await chooseCategoryForTx(
+      user.id,
+      t.description,
+      Number(t.amount),
+      t.category
+    );
     if (newCat !== t.category) {
       await prisma.transaction.update({ where: { id: t.id }, data: { category: newCat } });
       updatedCount++;
@@ -516,7 +539,11 @@ app.post("/v1/aggregations/flinks/exchange", requireAuth, async (req: AuthedReq,
     });
     const accessToken = (tokenResp as any).access_token || (tokenResp as any).token;
 
-    const conn = await upsertConnection(user.id, sessionId || loginId || "flinks", accessToken);
+    const conn = await upsertConnection(
+      user.id,
+      sessionId || loginId || "flinks",
+      accessToken
+    );
 
     const accountsResp = await flinksFetch("/accounts", {
       method: "POST",
@@ -680,7 +707,6 @@ const MOCK_ACCOUNTS = [
   },
 ];
 
-// Aug, Sep (and your Oct you added separately)
 // Aug, Sep, Oct 2025 mock transactions
 const MOCK_TRANSACTIONS = [
   // ===== October 2025 =====
@@ -751,7 +777,7 @@ const MOCK_TRANSACTIONS = [
   { externalId: "2025-08_groc_2", accountExternalId: "acc_chk_1234", date: "2025-08-21", description: "Costco", amount: -132.7, category: "Groceries", provider: "mock" },
 
   { externalId: "2025-08_sub_1", accountExternalId: "acc_chk_1234", date: "2025-08-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
-  { externalId: "2025-08_sub_2", accountExternalId: "acc_chk_1234", date: "2025-08-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
+  { externalId: "2025-08_sub_2", accountExternalId: "acc_chk_1234", date: "2025-08-01", description: "Netflix", amount: -15.49", category: "Subscriptions", provider: "mock" },
 
   { externalId: "2025-08_trans_1", accountExternalId: "acc_cc_9876", date: "2025-08-06", description: "Gas", amount: -48.75, category: "Transport", provider: "mock" },
   { externalId: "2025-08_trans_2", accountExternalId: "acc_cc_9876", date: "2025-08-28", description: "Uber", amount: -16.2, category: "Transport", provider: "mock" },
@@ -775,7 +801,7 @@ const MOCK_TRANSACTIONS = [
   { externalId: "2025-08_health_2", accountExternalId: "acc_chk_1234", date: "2025-08-20", description: "Clinic", amount: -45.0, category: "Health", provider: "mock" },
 ];
 
-
+/* ------------------------------- Mock seed ------------------------------- */
 async function seedMockDataForUser(userId: string) {
   const conn = await upsertConnection(userId, "mock-connection", "mock-token");
   // Accounts
@@ -837,10 +863,30 @@ if (FLINKS_MODE === "mock") {
   });
 }
 
+/* ------------------------------ AI endpoints ----------------------------- */
+// Protect the AI routes with auth; your ./routes/ai can assume req.user exists
+app.use("/v1/ai", requireAuth, aiRouter);
+
 /* --------------------------- Errors & Boot ------------------------------- */
 app.use((err: any, _req: any, res: any, _next: any) => {
   console.error("EXPRESS ERROR:", err);
   res.status(500).json({ error: err?.message ?? "server error" });
+});
+
+// Graceful shutdown (Railway)
+process.on("SIGTERM", async () => {
+  try {
+    await prisma.$disconnect();
+  } finally {
+    process.exit(0);
+  }
+});
+process.on("SIGINT", async () => {
+  try {
+    await prisma.$disconnect();
+  } finally {
+    process.exit(0);
+  }
 });
 
 const port = process.env.PORT || 4000;
