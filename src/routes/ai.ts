@@ -2,7 +2,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import OpenAI from "openai";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -36,7 +36,6 @@ function daysAgo(n: number) {
   d.setDate(d.getDate() - n);
   return d;
 }
-
 function round(n: number, p = 2) {
   return Math.round(n * 10 ** p) / 10 ** p;
 }
@@ -74,7 +73,7 @@ async function buildSnapshot(userId: string, rangeDays = 60): Promise<Snapshot> 
 
   const byCategory = [...catMap.entries()]
     .map(([category, total]) => ({ category, total: round(total) }))
-    .sort((a, b) => a.total - b.total) // biggest spend (most negative) first after we slice below
+    .sort((a, b) => a.total - b.total) // most negative first after slice
     .slice(0, 8);
 
   const recent: TxMini[] = txs.slice(0, 20).map((t) => ({
@@ -100,51 +99,49 @@ router.post("/chat", async (req: AuthedReq, res: Response) => {
     const message = (req.body?.message ?? "").toString().trim();
     if (!message) return res.status(400).json({ error: "message is required" });
 
-    // Find the app user by Firebase uid (set by your auth middleware)
     const firebaseUid = req.user?.uid;
     if (!firebaseUid) return res.status(401).json({ error: "Unauthorized" });
 
     const user = await prisma.user.findUnique({ where: { firebaseUid } });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Build snapshot
     const rangeDays = Math.max(7, Math.min(180, Number(req.body?.rangeDays ?? 60)));
     const snapshot = await buildSnapshot(user.id, rangeDays);
 
     const openai = requireOpenAI();
 
-    const system = [
-      "You are Budgeteer, a helpful personal finance assistant.",
-      "Ground every answer in the user's provided finance snapshot.",
-      "Prefer concrete numbers (totals, category spend, examples), then give 2-4 actionable next steps.",
-      "Be concise. Use short paragraphs or bullet points. No tables unless asked.",
-      "If data is missing or insufficient, say so briefly and suggest what to link or collect.",
-    ].join(" ");
+    const system =
+      "You are Budgeteer, a helpful personal finance assistant. " +
+      "Ground every answer in the user's provided finance snapshot. " +
+      "Prefer concrete numbers (totals, category spend, examples), then give 2-4 actionable next steps. " +
+      "Be concise. Use short paragraphs or bullet points. No tables unless asked. " +
+      "If data is insufficient, say so briefly.";
 
-    // Keep the snapshot compact to control tokens
     const snapshotText =
       "USER_FINANCE_SNAPSHOT\n" + JSON.stringify(snapshot, null, 0).slice(0, 12000);
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
-      max_tokens: 450,
-      messages: [
-        { role: "system", content: system },
-        {
-          role: "system",
-          content:
-            "The following JSON is the user's recent financial context for the last " +
-            rangeDays +
-            " days. Use it for calculations:\n" +
-            "```json\n" +
-            snapshotText +
-            "\n```",
-        },
-        { role: "user", content: message },
-      ],
-      timeout: 20_000,
-    });
+    // NOTE: pass timeout as the SECOND ARGUMENT, not inside the params object.
+    const completion = await openai.chat.completions.create(
+      {
+        model: "gpt-4o-mini",
+        temperature: 0.4,
+        max_tokens: 450,
+        messages: [
+          { role: "system", content: system },
+          {
+            role: "system",
+            content:
+              "The following JSON is the user's recent financial context for the last " +
+              rangeDays +
+              " days. Use it for calculations:\n```json\n" +
+              snapshotText +
+              "\n```",
+          },
+          { role: "user", content: message },
+        ],
+      },
+      { timeout: 20_000 }
+    );
 
     const reply =
       completion.choices?.[0]?.message?.content?.toString() ??
