@@ -777,7 +777,7 @@ const MOCK_TRANSACTIONS = [
   { externalId: "2025-08_groc_2", accountExternalId: "acc_chk_1234", date: "2025-08-21", description: "Costco", amount: -132.7, category: "Groceries", provider: "mock" },
 
   { externalId: "2025-08_sub_1", accountExternalId: "acc_chk_1234", date: "2025-08-14", description: "Spotify", amount: -10.99, category: "Subscriptions", provider: "mock" },
-  { externalId: "2025-08_sub_2", accountExternalId: "acc_chk_1234", date: "2025-08-01", description: "Netflix", amount: -15.49", category: "Subscriptions", provider: "mock" },
+  { externalId: "2025-08_sub_2", accountExternalId: "acc_chk_1234", date: "2025-08-01", description: "Netflix", amount: -15.49, category: "Subscriptions", provider: "mock" },
 
   { externalId: "2025-08_trans_1", accountExternalId: "acc_cc_9876", date: "2025-08-06", description: "Gas", amount: -48.75, category: "Transport", provider: "mock" },
   { externalId: "2025-08_trans_2", accountExternalId: "acc_cc_9876", date: "2025-08-28", description: "Uber", amount: -16.2, category: "Transport", provider: "mock" },
