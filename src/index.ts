@@ -5,7 +5,7 @@ import cors from "cors";
 import helmet from "helmet";
 import admin from "firebase-admin";
 import { PrismaClient, Prisma } from "@prisma/client";
-import aiRouter from "./routes/ai"; // <-- your chatbot routes
+import aiRouter from "./routes/ai"; // chatbot routes (already built)
 
 const prisma = new PrismaClient();
 
@@ -43,31 +43,57 @@ const prisma = new PrismaClient();
 })();
 
 /* -------------------------------- Flinks -------------------------------- */
+// Modes: "mock" (seed local fixtures) or "live" (call Flinks sandbox/prod)
 const FLINKS_MODE = (process.env.FLINKS_MODE || "mock").toLowerCase();
-const FLINKS_BASE_URL = process.env.FLINKS_BASE_URL || "";
-const FLINKS_CONNECT_URL = process.env.FLINKS_CONNECT_URL || "";
-const FLINKS_CLIENT_ID = process.env.FLINKS_CLIENT_ID || "";
-const FLINKS_CLIENT_SECRET = process.env.FLINKS_CLIENT_SECRET || "";
+
+// Base URLs (set these for the sandbox you were given)
+const FLINKS_BASE_URL = process.env.FLINKS_BASE_URL || ""; // e.g. https://toolbox-api.private.fin.ag
+const FLINKS_CONNECT_URL = process.env.FLINKS_CONNECT_URL || ""; // e.g. https://toolbox-iframe.private.fin.ag/v2
 const FLINKS_REDIRECT_URI =
   process.env.FLINKS_REDIRECT_URI || "budgeteer://flinks/callback";
+
+// Legacy OAuth/session (used by /connect/token flow if you use it)
+const FLINKS_CLIENT_ID = process.env.FLINKS_CLIENT_ID || "";
+const FLINKS_CLIENT_SECRET = process.env.FLINKS_CLIENT_SECRET || "";
+
+// Sandbox/toolbox headers (from Flinks email)
+const FLINKS_X_API_KEY = process.env.FLINKS_X_API_KEY || "";
+const FLINKS_BEARER = process.env.FLINKS_BEARER || "";
+const FLINKS_CUSTOMER_ID = process.env.FLINKS_CUSTOMER_ID || "";
+const FLINKS_AUTH_KEY = process.env.FLINKS_AUTH_KEY || ""; // if you need /GenerateAuthorizeToken later
 
 function ensureLive(res: express.Response, op: string) {
   if (FLINKS_MODE !== "live") {
     res.status(400).json({ error: `${op}: FLINKS_MODE must be 'live'` });
     return false;
   }
-  if (!FLINKS_BASE_URL || !FLINKS_CLIENT_ID || !FLINKS_CLIENT_SECRET) {
-    res.status(500).json({ error: "Flinks env vars missing" });
+  if (!FLINKS_BASE_URL) {
+    res.status(500).json({ error: "Flinks base URL missing" });
     return false;
   }
   return true;
 }
 
+// Generic fetch with Flinks sandbox headers baked in
 async function flinksFetch(path: string, init?: RequestInit) {
   const url = `${FLINKS_BASE_URL}${path}`;
-  const headers = { "Content-Type": "application/json", ...(init?.headers || {}) };
-  const r = await fetch(url, { ...init, headers });
-  if (!r.ok) throw new Error(`Flinks ${path} failed ${r.status}: ${await r.text()}`);
+  const defaultHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  // Toolbox/sandbox auth headers
+  if (FLINKS_X_API_KEY) defaultHeaders["x-api-key"] = FLINKS_X_API_KEY;
+  if (FLINKS_BEARER) defaultHeaders["Authorization"] = `Bearer ${FLINKS_BEARER}`;
+  if (FLINKS_CUSTOMER_ID) {
+    defaultHeaders["customerid"] = FLINKS_CUSTOMER_ID;
+    defaultHeaders["x-customer-id"] = FLINKS_CUSTOMER_ID;
+  }
+
+  const headers = { ...defaultHeaders, ...(init?.headers as any) };
+  const r = await fetch(url, { ...init, headers } as any);
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(`Flinks ${path} failed ${r.status}: ${txt}`);
+  }
   return r.json();
 }
 
@@ -496,22 +522,23 @@ app.post("/v1/transactions/reclassify", requireAuth, async (req: AuthedReq, res)
 });
 
 /* --------------------------- Flinks: Connect ----------------------------- */
+// For demo iframe flow (sandbox) or your own OAuth flow (prod if used)
 app.post("/v1/aggregations/flinks/init", requireAuth, async (_req, res) => {
   if (FLINKS_MODE === "mock") {
     return res.json({ connectUrl: "mock://connect", sessionId: "mock-session" });
   }
-
   if (!ensureLive(res, "init")) return;
   try {
-    const params = new URLSearchParams({ redirectUrl: FLINKS_REDIRECT_URI });
+    const params = new URLSearchParams({ demo: "true", redirectUrl: FLINKS_REDIRECT_URI });
     const connectUrl = `${FLINKS_CONNECT_URL}/?${params.toString()}`;
-    res.json({ connectUrl });
+    res.json({ connectUrl, sessionId: "sandbox-demo" });
   } catch (e: any) {
     console.error("flinks init error", e);
     res.status(500).json({ error: e.message });
   }
 });
 
+// (Optional) legacy exchange flow if you’re using /connect/token
 app.post("/v1/aggregations/flinks/exchange", requireAuth, async (req: AuthedReq, res) => {
   const firebaseUid = req.user?.uid!;
   const user = await prisma.user.findUnique({ where: { firebaseUid } });
@@ -527,6 +554,7 @@ app.post("/v1/aggregations/flinks/exchange", requireAuth, async (req: AuthedReq,
 
   const { loginId, sessionId, code } = (req.body || {}) as any;
   try {
+    // Only works if your environment supports this token endpoint
     const tokenResp = await flinksFetch("/connect/token", {
       method: "POST",
       body: JSON.stringify({
@@ -597,6 +625,78 @@ app.post("/v1/aggregations/flinks/exchange", requireAuth, async (req: AuthedReq,
   } catch (e: any) {
     console.error("flinks exchange error", e);
     res.status(500).json({ error: e.message });
+  }
+});
+
+/* -------- Flinks SANDBOX one-shot ingest (accounts + transactions) ------- */
+// Use this to import sandbox data directly into your DB.
+app.post("/v1/aggregations/flinks/sandbox/ingest", requireAuth, async (req: AuthedReq, res) => {
+  try {
+    if (!ensureLive(res, "sandbox/ingest")) return;
+
+    const firebaseUid = req.user?.uid!;
+    const user = await prisma.user.findUnique({ where: { firebaseUid } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const conn = await upsertConnection(user.id, "flinks-sandbox", "sandbox-token");
+
+    // NOTE: paths may vary by environment; adjust if your sandbox uses different routes
+    const accountsResp = await flinksFetch(`/v2/accounts`, { method: "GET" });
+    const accounts = Array.isArray((accountsResp as any).accounts)
+      ? (accountsResp as any).accounts
+      : (accountsResp as any).data ?? (accountsResp as any) ?? [];
+
+    for (const a of accounts) {
+      await upsertAccount(user.id, conn.id, {
+        externalId: String(a.id || a.accountId || a.AccountId),
+        name: a.name || a.displayName || a.AccountName || "Account",
+        type: a.type || a.accountType || a.AccountType || "account",
+        mask: a.mask || a.Last4 || null,
+        currency: a.currency || a.Currency || "CAD",
+        balance: Number(a.balance ?? a.CurrentBalance ?? 0),
+      });
+    }
+
+    const txResp = await flinksFetch(`/v2/transactions`, { method: "GET" });
+    const txs = Array.isArray((txResp as any).transactions)
+      ? (txResp as any).transactions
+      : (txResp as any).data ?? (txResp as any) ?? [];
+
+    // Map for account IDs
+    const accs = await prisma.account.findMany({
+      where: { userId: user.id },
+      select: { id: true, externalId: true },
+    });
+    const idByExt: Record<string, string> = {};
+    for (const a of accs) idByExt[String(a.externalId)] = a.id;
+
+    let created = 0;
+    for (const t of txs) {
+      const acctExternalId = String(t.accountId || t.AccountId || t.account?.id || "");
+      const accountId = idByExt[acctExternalId];
+      if (!accountId) continue;
+
+      const amount = Number(t.amount ?? t.Amount ?? 0);
+      const desc = String(t.description || t.Memo || t.merchant || "Transaction");
+      const providerCategory = t.category || t.Category || t.enrichedCategory || null;
+
+      const chosenCategory = await chooseCategoryForTx(user.id, desc, amount, providerCategory);
+
+      await upsertTransaction(user.id, accountId, {
+        externalId: String(t.id || t.transactionId || t.TransactionId),
+        date: new Date(t.date || t.postedDate || t.TransactionDate),
+        description: desc,
+        amount,
+        category: chosenCategory,
+        raw: t,
+      });
+      created++;
+    }
+
+    res.json({ ok: true, accountsImported: accounts.length || 0, transactionsImported: created });
+  } catch (e: any) {
+    console.error("sandbox ingest error", e);
+    res.status(500).json({ error: e?.message ?? "server error" });
   }
 });
 
@@ -864,7 +964,7 @@ if (FLINKS_MODE === "mock") {
 }
 
 /* ------------------------------ AI endpoints ----------------------------- */
-// Protect the AI routes with auth; your ./routes/ai can assume req.user exists
+// Protect the AI routes with auth; ./routes/ai assumes req.user exists
 app.use("/v1/ai", requireAuth, aiRouter);
 
 /* --------------------------- Errors & Boot ------------------------------- */
