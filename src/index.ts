@@ -597,6 +597,9 @@ const MOCK_ACCOUNTS = [
   { externalId: "acc_cc_9876", name: "Credit Card", type: "credit", mask: "9876", currency: "CAD", balance: -438.71, nickname: null, provider: "mock" },
 ];
 // ... and your MOCK_TRANSACTIONS array from your current file (unchanged)
+// --- Mock placeholders (not used in sandbox/live, but required for TS) ---
+const MOCK_ACCOUNTS: any[] = [];
+const MOCK_TRANSACTIONS: any[] = [];
 
 async function seedMockDataForUser(userId: string) {
   const conn = await upsertConnection(userId, "mock-connection", "mock-token");
